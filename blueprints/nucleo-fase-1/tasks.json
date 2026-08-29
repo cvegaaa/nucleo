@@ -1,0 +1,424 @@
+[
+  {
+    "id": "E1-T1",
+    "title": "Scaffold project and pin toolchain",
+    "epic": "01-fundacion-y-datos",
+    "dependencies": [],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm install --frozen-lockfile` corre THE SYSTEM SHALL salir con código 0 sin modificar el lockfile.",
+      "WHEN `pnpm exec biome check .` corre sobre el árbol recién generado (incluyendo `src/app/globals.css` con el `@theme` de Tailwind v4) THE SYSTEM SHALL salir con código 0.",
+      "WHEN `pnpm exec tsc --noEmit` corre THE SYSTEM SHALL salir con código 0.",
+      "WHEN `pnpm build` corre THE SYSTEM SHALL salir con código 0 y producir `.next/standalone/`.",
+      "WHEN `docker compose -f docker-compose.yml up -d postgres redis` corre THE SYSTEM SHALL dejar ambos contenedores en estado `healthy` según su healthcheck en menos de 30s."
+    ],
+    "verify": [
+      "pnpm install --frozen-lockfile",
+      "pnpm exec biome check .",
+      "pnpm exec tsc --noEmit",
+      "pnpm build",
+      "test -d .next/standalone",
+      "docker compose up -d postgres redis",
+      "timeout 30 bash -c 'until [ \"$(docker inspect -f \"{{.State.Health.Status}}\" $(docker compose ps -q postgres))\" = \"healthy\" ]; do sleep 1; done'"
+    ],
+    "checkpoint": "step-01-scaffold",
+    "files": ["package.json", "pnpm-lock.yaml", ".nvmrc", "next.config.ts", ".github/workflows/ci.yml"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T2",
+    "title": "Design tokens and app shell",
+    "epic": "01-fundacion-y-datos",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm dev` arranca y se visita `/` THE SYSTEM SHALL responder 200 con el layout de marketing.",
+      "WHEN se visita `/app/inbox` sin sesión THE SYSTEM SHALL redirigir a `/login?next=/app/inbox` (protección estructural vía proxy stub — auth real llega en E1-T4).",
+      "WHEN el viewport es menor a 768px THE SYSTEM SHALL colapsar la navegación en un `Sheet` sin scroll horizontal.",
+      "WHEN `prefers-color-scheme: dark` está activo y no hay cookie de preferencia THE SYSTEM SHALL renderizar el tema oscuro en el HTML inicial del servidor, sin parpadeo de tema claro."
+    ],
+    "verify": [
+      "pnpm exec biome check . && pnpm exec tsc --noEmit",
+      "pnpm test:e2e tests/e2e/app-shell.spec.ts"
+    ],
+    "checkpoint": "step-02-app-shell",
+    "files": [
+      "src/app/globals.css",
+      "src/app/(marketing)/**",
+      "src/app/(app)/layout.tsx",
+      "tests/e2e/app-shell.spec.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T3",
+    "title": "Complete database schema and first migration",
+    "epic": "01-fundacion-y-datos",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm db:migrate` corre contra una base vacía THE SYSTEM SHALL crear exactamente las 23 tablas (user, organization, membership, role, permission, role_permission, invitation, audit_event, channel_connection, contact, tag, contact_tag, conversation, message, jobs, job_dead_letters, idempotency_keys, llm_calls, prompts, runs, steps, tool_calls, approvals) — ni una menos ni una de más — cada una verificable con `psql -c '\\d <tabla>'` saliendo con código 0.",
+      "WHEN `pnpm db:seed` corre THE SYSTEM SHALL insertar 6 filas en `permission` y 2 filas en `role` (`owner`, `member`) con sus `role_permission` correspondientes.",
+      "WHEN se intenta insertar una `membership` con `(org_id, user_id)` duplicado THE SYSTEM SHALL rechazar la escritura por el índice único.",
+      "WHEN `DATABASE_URL` está ausente al importar `src/lib/db/index.ts` THE SYSTEM SHALL fallar al boot con un error nombrado, no en el primer query."
+    ],
+    "verify": [
+      "set -a && . ./.env && set +a",
+      "pnpm db:migrate",
+      "pnpm test tests/unit/schema.test.ts",
+      "pnpm db:seed",
+      "test \"$(psql \"$DATABASE_URL\" -tAc 'select count(*) from permission;')\" = \"6\"",
+      "test \"$(psql \"$DATABASE_URL\" -tAc 'select count(*) from role;')\" = \"2\""
+    ],
+    "checkpoint": "step-03-schema",
+    "files": [
+      "src/lib/db/schema.ts",
+      "src/lib/db/index.ts",
+      "drizzle.config.ts",
+      "scripts/seed.ts",
+      "tests/unit/schema.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T4",
+    "title": "Auth with better-auth",
+    "epic": "01-fundacion-y-datos",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un visitante envía signup con email válido y nuevo THE SYSTEM SHALL crear un `user`, una `organization` con slug único, una `membership` con rol `owner`, y redirigir a `/app/inbox`.",
+      "WHEN un usuario envía login con credenciales correctas THE SYSTEM SHALL establecer una cookie de sesión `HttpOnly` y redirigir a `/app/inbox`.",
+      "WHEN una request sin sesión llega a `/app/inbox` THE SYSTEM SHALL redirigir a `/login?next=/app/inbox` vía `src/proxy.ts`.",
+      "WHEN se envía signup con un email ya registrado THE SYSTEM SHALL responder con error de validación sin crear una segunda organización.",
+      "WHEN el usuario hace sign-out THE SYSTEM SHALL invalidar la sesión server-side."
+    ],
+    "verify": [
+      "pnpm test tests/integration/auth.test.ts"
+    ],
+    "checkpoint": "step-04-auth",
+    "files": [
+      "src/lib/auth.ts",
+      "src/app/api/auth/[...all]/route.ts",
+      "src/proxy.ts",
+      "src/app/(auth)/**",
+      "tests/integration/auth.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T5",
+    "title": "Tenancy guard and isolation tests",
+    "epic": "01-fundacion-y-datos",
+    "dependencies": ["E1-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario con membership activa en la org del recurso y el permiso requerido llama `requirePermission` THE SYSTEM SHALL retornar sin lanzar.",
+      "WHEN un usuario sin membership en la org del recurso llama `requirePermission` THE SYSTEM SHALL lanzar un error que el handler traduce a 404.",
+      "WHEN un usuario con membership en la org pero sin el permiso requerido llama `requirePermission` THE SYSTEM SHALL lanzar el mismo error tipado, resultando en 404 — nunca 403.",
+      "WHEN el test E2E de aislamiento intenta acceder a un recurso de la organización B usando la sesión de un usuario de la organización A THE SYSTEM SHALL responder 404 en cada endpoint probado."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/tenant-isolation.spec.ts"
+    ],
+    "checkpoint": "step-05-tenancy",
+    "files": ["src/server/tenancy.ts", "tests/e2e/tenant-isolation.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T6",
+    "title": "Audit log written in the same transaction",
+    "epic": "01-fundacion-y-datos",
+    "dependencies": ["E1-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `recordAuditEvent` se llama dentro de una transacción que luego hace commit THE SYSTEM SHALL persistir la fila en `audit_event`.",
+      "WHEN la transacción que contiene la llamada a `recordAuditEvent` hace rollback THE SYSTEM SHALL dejar `audit_event` sin la fila — cero filas huérfanas."
+    ],
+    "verify": [
+      "pnpm test tests/unit/audit.test.ts"
+    ],
+    "checkpoint": "step-06-audit",
+    "files": ["src/lib/audit.ts", "tests/unit/audit.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T1",
+    "title": "Roles catalog and member management",
+    "epic": "02-canales-y-bandeja",
+    "dependencies": ["E1-T6"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un owner invita a un email con un rol válido THE SYSTEM SHALL crear una `invitation` con token único y expiración de 7 días, y enviar un correo con el link.",
+      "WHEN se visita el link de aceptación con un token válido y no expirado THE SYSTEM SHALL crear la `membership` correspondiente y marcar la invitación como usada.",
+      "WHEN se visita el link con un token expirado THE SYSTEM SHALL responder con un error claro sin crear la membership.",
+      "WHEN un miembro sin `member.manage` intenta cambiar el rol de otro miembro THE SYSTEM SHALL responder 404 (vía `requirePermission`).",
+      "WHEN un owner remueve a un miembro THE SYSTEM SHALL borrar la `membership` y registrar un `audit_event` con action `member.removed` en la misma transacción."
+    ],
+    "verify": [
+      "pnpm test tests/integration/members.test.ts"
+    ],
+    "checkpoint": "step-07-members",
+    "files": [
+      "src/server/members.ts",
+      "src/app/api/members/route.ts",
+      "src/app/api/invitations/route.ts",
+      "src/app/(app)/settings/members/page.tsx",
+      "tests/integration/members.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T2",
+    "title": "Channel connections and inbound webhooks",
+    "epic": "02-canales-y-bandeja",
+    "dependencies": ["E2-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un webhook de WhatsApp llega con firma inválida sobre el raw body THE SYSTEM SHALL responder 401 y no encolar ningún job.",
+      "WHEN un webhook llega con firma válida y un `event_id` nunca visto por esta org THE SYSTEM SHALL insertar en `idempotency_keys`, encolar exactamente un job, y responder 200 en menos de 1 segundo.",
+      "WHEN el mismo `event_id` llega dos veces para la misma org THE SYSTEM SHALL responder 200 ambas veces sin encolar un segundo job.",
+      "WHEN el `external_account_id` del payload no corresponde a ningún `channel_connection` activo THE SYSTEM SHALL responder 404 sin filtrar información sobre qué cuentas existen.",
+      "WHEN los 4 canales reciben el mismo evento estructuralmente equivalente THE SYSTEM SHALL producir el mismo shape normalizado interno antes de encolarlo."
+    ],
+    "verify": [
+      "pnpm test tests/integration/webhooks.test.ts"
+    ],
+    "checkpoint": "step-08-webhooks",
+    "files": [
+      "src/server/channels/*.ts",
+      "src/app/api/webhooks/*/route.ts",
+      "tests/integration/webhooks.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T3",
+    "title": "Background job runner with BullMQ",
+    "epic": "02-canales-y-bandeja",
+    "dependencies": ["E2-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN se encola un job válido en `inboundEventsQueue` THE SYSTEM SHALL procesarlo y marcarlo completado en menos de 5 segundos en el entorno de test.",
+      "WHEN el handler del job lanza una excepción THE SYSTEM SHALL reintentar con backoff exponencial hasta 5 intentos.",
+      "WHEN un job agota sus 5 intentos THE SYSTEM SHALL insertar una fila en `job_dead_letters` con el error y dejar de reintentar.",
+      "WHEN dos jobs con el mismo `idempotency_key` de evento normalizado se procesan (carrera de reintentos) THE SYSTEM SHALL producir un único `message` — no duplicado."
+    ],
+    "verify": [
+      "pnpm test tests/integration/queue.test.ts"
+    ],
+    "checkpoint": "step-09-queue",
+    "files": [
+      "src/lib/queue/connection.ts",
+      "src/lib/queue/index.ts",
+      "scripts/worker.ts",
+      "tests/integration/queue.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T4",
+    "title": "Conversation and message CRUD",
+    "epic": "02-canales-y-bandeja",
+    "dependencies": ["E2-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN llega el primer mensaje entrante de un contacto nunca visto en un canal THE SYSTEM SHALL crear un `contact` con el `external_ids` de ese canal poblado, y una `conversation` nueva en estado `open`.",
+      "WHEN llega un segundo mensaje entrante del mismo contacto en el mismo canal dentro de una conversación existente THE SYSTEM SHALL reutilizar el `contact` y la `conversation` existentes, insertando solo un nuevo `message`.",
+      "WHEN un usuario con `conversation.assign` cambia el `assignedTo` de una conversación THE SYSTEM SHALL persistir el cambio y registrar un `audit_event` con action `conversation.assigned`.",
+      "WHEN un usuario lista conversaciones filtrando por `status=open&channel=whatsapp` THE SYSTEM SHALL retornar solo conversaciones de su organización que cumplen ambos filtros, paginadas por cursor."
+    ],
+    "verify": [
+      "pnpm test tests/integration/conversations.test.ts"
+    ],
+    "checkpoint": "step-10-conversations",
+    "files": [
+      "src/server/conversations.ts",
+      "src/server/contacts.ts",
+      "src/app/api/conversations/route.ts",
+      "src/app/api/conversations/[id]/route.ts",
+      "scripts/worker.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T5",
+    "title": "Unified inbox",
+    "epic": "02-canales-y-bandeja",
+    "dependencies": ["E2-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario visita `/app/inbox` con conversaciones existentes THE SYSTEM SHALL renderizar la lista ordenada por `last_message_at` descendente en el primer response del servidor, sin spinner de carga inicial.",
+      "WHEN el usuario aplica el filtro `status=pending` THE SYSTEM SHALL actualizar la URL con el search param correspondiente y refetch solo las conversaciones que cumplen el filtro.",
+      "WHEN no hay conversaciones que cumplan los filtros activos THE SYSTEM SHALL mostrar el estado vacío específico \"Sin resultados para estos filtros\", distinto del estado vacío de \"sin canales conectados\".",
+      "WHEN el usuario hace scroll hasta el final de la lista THE SYSTEM SHALL cargar la siguiente página vía cursor sin recargar las anteriores.",
+      "WHEN se renderiza un `ConversationListItem` THE SYSTEM SHALL mostrar la insignia del canal (whatsapp/instagram/facebook/tiktok) superpuesta en el avatar, visible sin abrir la conversación, con `aria-label` legible por lector de pantalla."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/inbox.spec.ts"
+    ],
+    "checkpoint": "step-11-inbox",
+    "files": [
+      "src/app/(app)/inbox/page.tsx",
+      "src/components/inbox/conversation-list.tsx",
+      "src/components/inbox/conversation-view.tsx",
+      "src/components/inbox/filters-bar.tsx",
+      "tests/e2e/inbox.spec.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T6",
+    "title": "Realtime inbox updates",
+    "epic": "02-canales-y-bandeja",
+    "dependencies": ["E2-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN llega un mensaje entrante nuevo para una conversación visible en la bandeja de un usuario conectado THE SYSTEM SHALL actualizar la lista sin que el usuario recargue la página.",
+      "WHEN un usuario de la organización A está conectado y llega un evento de la organización B THE SYSTEM SHALL no entregarlo — el room de Socket.IO aísla por `org_id`.",
+      "WHEN el servidor Node se reinicia con múltiples instancias detrás del mismo Redis THE SYSTEM SHALL seguir entregando eventos a clientes conectados a una instancia distinta de la que originó el evento."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/inbox-live.spec.ts"
+    ],
+    "checkpoint": "step-12-realtime",
+    "files": [
+      "src/lib/realtime/server.ts",
+      "src/lib/realtime/client.ts",
+      "scripts/worker.ts",
+      "src/server/conversations.ts",
+      "tests/e2e/inbox-live.spec.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T1",
+    "title": "AI gateway over the Anthropic SDK",
+    "epic": "03-copiloto-y-hardening",
+    "dependencies": ["E2-T6"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `streamCopilotTurn` recibe una conversación válida THE SYSTEM SHALL transmitir los deltas de texto vía el iterador retornado hasta `stop_reason: \"end_turn\"` o `\"tool_use\"`.",
+      "WHEN la API responde `stop_reason: \"refusal\"` THE SYSTEM SHALL retornar un resultado tipado `{ type: \"refusal\" }` sin lanzar una excepción no controlada.",
+      "WHEN `COPILOT_MODEL_ID` no está definido en el entorno al importar el módulo THE SYSTEM SHALL fallar al boot con un error nombrado.",
+      "WHEN la llamada a la API excede 30 segundos sin respuesta THE SYSTEM SHALL abortar y reintentar exactamente una vez antes de propagar el error al llamador."
+    ],
+    "verify": [
+      "pnpm test tests/unit/gateway.test.ts"
+    ],
+    "checkpoint": "step-13-ai-gateway",
+    "files": ["package.json", "src/lib/ai/gateway.ts", "tests/unit/gateway.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T2",
+    "title": "Contextual copilot with first-use approval",
+    "epic": "03-copiloto-y-hardening",
+    "dependencies": ["E3-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el usuario pregunta algo sobre la conversación abierta THE SYSTEM SHALL responder con contexto de los mensajes de esa conversación, transmitido vía streaming al panel.",
+      "WHEN el copiloto invoca `tag_conversation` por primera vez en una organización THE SYSTEM SHALL crear una fila en `approvals` sin decisión y detener el run en estado `pending`, sin ejecutar la mutación.",
+      "WHEN un usuario con permiso aprueba esa `tool_call` pendiente THE SYSTEM SHALL ejecutar la mutación, registrar el `audit_event` correspondiente, y continuar el run.",
+      "WHEN la misma organización invoca `tag_conversation` una segunda vez tras la primera aprobación THE SYSTEM SHALL ejecutarla directamente sin volver a pedir aprobación.",
+      "WHEN el copiloto intenta invocar una acción de envío a un canal externo THE SYSTEM SHALL rechazarla — el catálogo de tools de Fase 1 no incluye ninguna acción de canal externo."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/copilot.spec.ts"
+    ],
+    "checkpoint": "step-14-copilot",
+    "files": [
+      "src/server/copilot/tools.ts",
+      "src/server/copilot/runs.ts",
+      "src/app/api/copilot/**",
+      "src/components/copilot/copilot-panel.tsx",
+      "tests/e2e/copilot.spec.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T3",
+    "title": "Account deletion with data export",
+    "epic": "03-copiloto-y-hardening",
+    "dependencies": ["E3-T2"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario solicita exportar sus datos THE SYSTEM SHALL retornar un JSON con sus conversaciones asignadas y mensajes marcados `sender_type='agent'` que él envió.",
+      "WHEN un usuario que es el único owner de una organización solicita eliminar su cuenta THE SYSTEM SHALL rechazar con un mensaje indicando que debe transferir la propiedad primero, sin borrar nada.",
+      "WHEN un usuario que no es único owner de ninguna organización confirma la eliminación THE SYSTEM SHALL borrar su `user` row y sus `membership`, dejando sus mensajes históricos intactos."
+    ],
+    "verify": [
+      "pnpm test tests/integration/account-deletion.test.ts"
+    ],
+    "checkpoint": "step-15-account-deletion",
+    "files": [
+      "src/app/(app)/settings/profile/page.tsx",
+      "src/app/api/v1/account/route.ts",
+      "tests/integration/account-deletion.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T4",
+    "title": "Hardening — rate limiting, logging, error boundaries",
+    "epic": "03-copiloto-y-hardening",
+    "dependencies": ["E3-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN se hacen 6 intentos de login fallidos desde la misma IP en menos de un minuto THE SYSTEM SHALL rechazar el sexto con 429 antes de evaluar las credenciales.",
+      "WHEN cualquier ruta de API loggea una línea THE SYSTEM SHALL emitirla como JSON válido en stdout con al menos los campos `level`, `msg`, `time`.",
+      "WHEN un Server Component de `(app)` lanza una excepción no controlada THE SYSTEM SHALL renderizar el `error.tsx` de ese segmento en vez de una página en blanco.",
+      "WHEN `pnpm test:e2e tests/e2e/a11y.spec.ts` corre contra `/login`, `/app/inbox` y `/app/settings/members` THE SYSTEM SHALL reportar 0 violaciones de axe."
+    ],
+    "verify": [
+      "pnpm test tests/integration/rate-limit.test.ts",
+      "pnpm test:e2e tests/e2e/a11y.spec.ts"
+    ],
+    "checkpoint": "step-16-hardening",
+    "files": [
+      "src/lib/logger.ts",
+      "src/app/**/error.tsx",
+      "next.config.ts",
+      "tests/integration/rate-limit.test.ts",
+      "tests/e2e/a11y.spec.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T5",
+    "title": "Deploy pipeline — Docker Compose + Caddy",
+    "epic": "03-copiloto-y-hardening",
+    "dependencies": ["E3-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `docker compose -f docker-compose.prod.yml up -d` corre en el VPS THE SYSTEM SHALL levantar los 5 servicios (app, worker, postgres, redis, caddy) con la app healthy en menos de 60 segundos.",
+      "WHEN el paso de deploy ejecuta las migraciones THE SYSTEM SHALL aplicarlas antes de que el contenedor de la app empiece a aceptar tráfico — nunca en paralelo.",
+      "WHEN `scripts/smoke-test.sh` corre tras un deploy exitoso THE SYSTEM SHALL salir con 0 tras verificar `GET /api/health` retorna `{ data: { ok: true, migrationsUpToDate: true } }`.",
+      "WHEN se intenta un UPDATE o DELETE directo sobre `audit_event` con el rol de aplicación de producción THE SYSTEM SHALL ser rechazado por el grant de BD aplicado en este paso."
+    ],
+    "verify": [
+      "bash scripts/smoke-test.sh",
+      "docker compose -f docker-compose.prod.yml exec -T postgres psql -U nucleo_app -d nucleo -c \"UPDATE audit_event SET action = action WHERE false;\" 2>/dev/null; test $? -ne 0"
+    ],
+    "checkpoint": "step-17-deploy",
+    "files": ["Dockerfile", "docker-compose.prod.yml", "Caddyfile", "scripts/smoke-test.sh"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T6",
+    "title": "Full local end-to-end verification",
+    "epic": "03-copiloto-y-hardening",
+    "dependencies": ["E3-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el gate completo de CI corre sobre un checkout limpio THE SYSTEM SHALL reportar 0 fallos en lint, typecheck, tests unitarios, tests de integración, y los 3 suites E2E.",
+      "WHEN se re-ejecuta el bloque de Bootstrap sobre un árbol ya bootstrapeado THE SYSTEM SHALL salir con 0 sin revertir `package.json` ni ningún archivo emitido bajo `workspace/`."
+    ],
+    "verify": [
+      "pnpm lint && pnpm typecheck && pnpm test && pnpm test:e2e"
+    ],
+    "checkpoint": "step-18-verification",
+    "files": [".github/workflows/ci.yml"],
+    "status": "pending"
+  }
+]

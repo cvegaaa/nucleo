@@ -1,0 +1,314 @@
+[
+  {
+    "id": "E1-T1",
+    "title": "Schema + migración push_subscription",
+    "epic": "01-push-infraestructura",
+    "dependencies": [],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm db:migrate` corre sobre la base de Fase 1-3 ya migrada THE SYSTEM SHALL crear la tabla `push_subscription` sin tocar ninguna tabla existente.",
+      "WHEN se inspecciona `push_subscription` con `\\d push_subscription` THE SYSTEM SHALL mostrar las columnas `id`, `org_id`, `user_id`, `endpoint`, `p256dh`, `auth_key`, `created_at`, `last_used_at`.",
+      "WHEN `pnpm test` corre sobre la suite unitaria heredada de Fase 1-3 después de este paso THE SYSTEM SHALL seguir en verde — `tests/setup/env.ts` puebla `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY` con valores dummy para que el arranque de `src/lib/env.ts` no falle antes de que el paso 3 las marque requeridas.",
+      "WHEN se inspecciona `.env.example` THE SYSTEM SHALL contener las 3 claves VAPID en blanco."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm db:migrate",
+      "psql \"$DATABASE_URL\" -c \"\\d push_subscription\"",
+      "pnpm test"
+    ],
+    "checkpoint": "step-49-push-schema",
+    "files": ["package.json", "src/lib/db/schema.ts", "drizzle/**", ".env.example", "tests/setup/env.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T2",
+    "title": "Rutas subscribe/unsubscribe",
+    "epic": "01-push-infraestructura",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario autenticado envía `POST /api/v1/push/subscribe` con un `endpoint`/`keys` válidos THE SYSTEM SHALL crear una fila en `push_subscription` con su `user_id` y `org_id`, y responder `201`.",
+      "WHEN el mismo `endpoint` se envía dos veces THE SYSTEM SHALL actualizar la fila existente (upsert), no crear una segunda — `select count(*) from push_subscription where endpoint = $1` permanece en `1`.",
+      "WHEN el body no incluye `keys.p256dh` THE SYSTEM SHALL responder `400` sin crear ninguna fila.",
+      "WHEN un usuario envía `POST /api/v1/push/unsubscribe` con un `endpoint` que le pertenece THE SYSTEM SHALL borrar esa fila y responder `200` con `{ deleted: true }`.",
+      "WHEN un usuario envía `POST /api/v1/push/unsubscribe` con un `endpoint` que no existe THE SYSTEM SHALL responder `200` con `{ deleted: false }`, nunca `404`."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/push/subscribe.test.ts"
+    ],
+    "checkpoint": "step-50-push-subscriptions",
+    "files": ["src/server/push/subscriptions.ts", "src/app/api/v1/push/subscribe/route.ts", "src/app/api/v1/push/unsubscribe/route.ts", "tests/push/subscribe.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T3",
+    "title": "sendPushNotification — envío aislado de fallos",
+    "epic": "01-push-infraestructura",
+    "dependencies": ["E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `sendPushNotification(userId, payload)` se llama y el usuario tiene 2 suscripciones válidas THE SYSTEM SHALL invocar `webpush.sendNotification` una vez por cada una y actualizar `last_used_at` en ambas.",
+      "WHEN una de las dos suscripciones responde con `statusCode: 410` THE SYSTEM SHALL borrar esa fila de `push_subscription` y enviar igual a la otra suscripción.",
+      "WHEN el envío a una suscripción falla con un error que no es 404/410 (ej. timeout de red) THE SYSTEM SHALL registrar el error con `logger.warn` y no borrar la fila.",
+      "WHEN `sendPushNotification` se llama para un usuario sin ninguna suscripción THE SYSTEM SHALL resolver sin error y sin llamar `webpush.sendNotification`.",
+      "WHEN `sendPushNotification` se llama y `webpush.sendNotification` lanza una excepción no relacionada con el protocolo (ej. JSON inválido) THE SYSTEM SHALL capturarla, registrarla, y la promesa retornada por `sendPushNotification` SHALL resolver igual — nunca rechaza.",
+      "WHEN `VAPID_PRIVATE_KEY` no está definida al arrancar la app desde este paso en adelante THE SYSTEM SHALL fallar el boot con un error nombrado, no servir tráfico que silenciosamente nunca envíe push."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/push/send.test.ts"
+    ],
+    "checkpoint": "step-51-push-send",
+    "files": ["src/lib/push/send.ts", "tests/push/send.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T4",
+    "title": "Service Worker + manifest PWA + registro en cliente",
+    "epic": "01-push-infraestructura",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un navegador con soporte de Service Worker visita cualquier ruta de `(app)` THE SYSTEM SHALL registrar `/sw.js` sin errores en consola.",
+      "WHEN se solicita `GET /sw.js` THE SYSTEM SHALL responder con el header `Cache-Control: no-cache, no-store, must-revalidate`.",
+      "WHEN se solicita `GET /manifest.webmanifest` THE SYSTEM SHALL responder `200` con `start_url` igual a `/app` y `display` igual a `standalone`.",
+      "WHEN el navegador no soporta `serviceWorker` (verificado con el guard `\"serviceWorker\" in navigator`) THE SYSTEM SHALL omitir el registro sin lanzar una excepción no controlada en el árbol de React."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm build",
+      "pnpm dev & sleep 3 && test \"$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/sw.js)\" = 200 && curl -s -I localhost:3000/sw.js | grep -qi 'cache-control: no-cache, no-store, must-revalidate' && test \"$(curl -s -o /dev/null -w '%{http_code}' localhost:3000/manifest.webmanifest)\" = 200; kill %1 2>/dev/null || true"
+    ],
+    "checkpoint": "step-52-sw-manifest",
+    "files": ["public/sw.js", "src/app/manifest.ts", "src/components/push/sw-register.tsx", "next.config.ts", "src/app/(app)/layout.tsx"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T5",
+    "title": "Opt-in de notificaciones en /app/settings/profile",
+    "epic": "01-push-infraestructura",
+    "dependencies": ["E1-T4"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario con `Notification.permission === \"default\"` hace clic en \"Activar notificaciones\" y concede el permiso THE SYSTEM SHALL crear una suscripción push y una fila en `push_subscription` para ese usuario.",
+      "WHEN el usuario deniega el permiso del navegador THE SYSTEM SHALL mostrar el mensaje inline de error sin crear ninguna fila.",
+      "WHEN un usuario ya suscrito visita `/app/settings/profile` THE SYSTEM SHALL mostrar el botón en estado \"Desactivar\", no \"Activar\".",
+      "WHEN un usuario suscrito hace clic en \"Desactivar\" THE SYSTEM SHALL borrar su fila de `push_subscription` y revertir el botón a \"Activar\".",
+      "WHEN `NEXT_PUBLIC_VAPID_PUBLIC_KEY` no está definida al hacer build desde este paso en adelante THE SYSTEM SHALL fallar el build con un error nombrado (validación de env de cliente, mismo mecanismo que Fase 1 usa para variables `NEXT_PUBLIC_*`)."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm build"
+    ],
+    "checkpoint": "step-53-push-opt-in",
+    "files": ["src/app/(app)/settings/profile/page.tsx", "src/components/push/push-opt-in.tsx"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T1",
+    "title": "Hook: mensaje entrante → push",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el worker procesa un mensaje entrante para una conversación con `assignedTo` no nulo THE SYSTEM SHALL llamar `sendPushNotification` exactamente una vez, con ese `user_id`.",
+      "WHEN el worker procesa un mensaje entrante para una conversación sin asignar THE SYSTEM SHALL llamar `sendPushNotification` una vez por cada usuario de la organización con permiso `conversation.reply`.",
+      "WHEN `sendPushNotification` es mockeado para rechazar (simulando un fallo interno no capturado) THE SYSTEM SHALL completar el procesamiento del job igual — el job de BullMQ se marca completado, no se reintenta por esta causa.",
+      "WHEN `pnpm test tests/integration/queue.test.ts` corre (el test de Fase 1, sin modificar) THE SYSTEM SHALL seguir reportando exit 0, 0 failed — esta edición no rompe el gate original."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/hooks/message-push.test.ts",
+      "pnpm test tests/integration/queue.test.ts"
+    ],
+    "checkpoint": "step-54-hook-message",
+    "files": ["scripts/worker.ts", "tests/hooks/message-push.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T2",
+    "title": "Hook: aprobación de copiloto pendiente → push",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el copiloto invoca por primera vez en una organización una tool call marcada `requiresApprovalFirstUse` THE SYSTEM SHALL llamar `sendPushNotification` una vez por cada usuario con el `permission_key` de esa tool.",
+      "WHEN la misma organización invoca la misma tool una segunda vez (ya aprobada, ejecución directa sin nueva fila en `approvals`) THE SYSTEM SHALL NOT llamar `sendPushNotification` para ese evento.",
+      "WHEN una organización no tiene ningún usuario con el `permission_key` requerido (caso borde) THE SYSTEM SHALL no llamar `sendPushNotification` y no lanzar ninguna excepción.",
+      "WHEN el test original de Fase 1 para el flujo de aprobación del copiloto corre THE SYSTEM SHALL seguir reportando exit 0 — esta edición no rompe el gate original."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/hooks/copilot-approval-push.test.ts",
+      "FILES=$(grep -rl \"requiresApprovalFirstUse\" tests/); [ -n \"$FILES\" ] || exit 1; echo \"$FILES\" | xargs pnpm test"
+    ],
+    "checkpoint": "step-55-hook-copilot-approval",
+    "files": ["src/server/copilot/runs.ts", "tests/hooks/copilot-approval-push.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T3",
+    "title": "Hook: canal desconectado — detección en los 4 webhooks",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN llega un webhook con `external_account_id` que no corresponde a ningún `channel_connection` activo THE SYSTEM SHALL responder `404` (comportamiento idéntico al de Fase 1) Y llamar `markChannelDisconnected` para ese `channel_connection`.",
+      "WHEN `markChannelDisconnected` se ejecuta THE SYSTEM SHALL actualizar `channel_connection.status` a `'disconnected'` y llamar `sendPushNotification` una vez por cada `owner` de la organización.",
+      "WHEN el test de integración de webhooks original de Fase 1 corre THE SYSTEM SHALL seguir reportando exit 0 — el código y body de la respuesta 404 no cambiaron."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/hooks/channel-disconnect-push.test.ts",
+      "pnpm test tests/integration/webhooks.test.ts"
+    ],
+    "checkpoint": "step-56-hook-disconnect-webhooks",
+    "files": ["src/server/channels/connection-health.ts", "src/app/api/webhooks/whatsapp/route.ts", "src/app/api/webhooks/instagram/route.ts", "src/app/api/webhooks/facebook/route.ts", "src/app/api/webhooks/tiktok/route.ts", "tests/hooks/channel-disconnect-push.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T4",
+    "title": "Hook: canal desconectado — banner persistente en (app)",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E2-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario visita cualquier ruta de `(app)` y su organización tiene ≥1 `channel_connection` con `status = 'disconnected'` THE SYSTEM SHALL renderizar el banner persistente.",
+      "WHEN ninguna `channel_connection` de la organización está desconectada THE SYSTEM SHALL NOT renderizar el banner."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/channels/disconnected-banner.test.tsx"
+    ],
+    "checkpoint": "step-57-hook-disconnect-banner",
+    "files": ["src/components/channels/disconnected-banner.tsx", "src/app/(app)/layout.tsx", "tests/channels/disconnected-banner.test.tsx"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T5",
+    "title": "Hook: aprobación de contenido pendiente → push",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el creador de una pieza en `draft` solicita aprobación THE SYSTEM SHALL llamar `sendPushNotification` una vez por cada usuario con permiso `content.approve` en la organización.",
+      "WHEN una organización no tiene ningún usuario con `content.approve` (caso borde) THE SYSTEM SHALL no llamar `sendPushNotification` y no lanzar ninguna excepción.",
+      "WHEN el test original de Fase 2 para `requestApproval` corre THE SYSTEM SHALL seguir reportando exit 0."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/hooks/content-approval-push.test.ts",
+      "FILES=$(grep -rl \"requestApproval\" tests/); [ -n \"$FILES\" ] || exit 1; echo \"$FILES\" | xargs pnpm test"
+    ],
+    "checkpoint": "step-58-hook-content-approval",
+    "files": ["src/server/content/approvals.ts", "tests/hooks/content-approval-push.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T6",
+    "title": "Hook: automatización fallida → push",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `action-runner.ts` marca un `automation_run.status = 'failed'` THE SYSTEM SHALL llamar `sendPushNotification` exactamente una vez, con el `created_by` de esa automatización.",
+      "WHEN `action-runner.ts` marca un `automation_run.status = 'partial'` THE SYSTEM SHALL NOT llamar `sendPushNotification`.",
+      "WHEN `action-runner.ts` marca un `automation_run.status = 'completed'` THE SYSTEM SHALL NOT llamar `sendPushNotification`.",
+      "WHEN `pnpm test tests/automations/retries-dead-letter.test.ts` corre (test original de Fase 3) THE SYSTEM SHALL seguir reportando exit 0."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/hooks/automation-failed-push.test.ts",
+      "pnpm test tests/automations/retries-dead-letter.test.ts"
+    ],
+    "checkpoint": "step-59-hook-automation-failed",
+    "files": ["src/server/automations/action-runner.ts", "tests/hooks/automation-failed-push.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T7",
+    "title": "Capa de datos del dashboard",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `getAttentionSummary` se llama para una organización con 1 conversación sin responder hace 3 horas THE SYSTEM SHALL incluirla en el campo `conversations`.",
+      "WHEN `getAttentionSummary` se llama para una organización sin ninguna aprobación pendiente en ningún dominio THE SYSTEM SHALL devolver los tres campos de aprobaciones como arrays vacíos, no `null` ni `undefined`.",
+      "WHEN `getAttentionSummary` se llama para dos organizaciones distintas con datos similares THE SYSTEM SHALL devolver resultados aislados por `org_id` — ninguna fila de la organización B aparece en el resultado de la organización A.",
+      "WHEN `getAttentionSummary` se llama y no hay automatizaciones fallidas en 24h THE SYSTEM SHALL devolver el campo `failedAutomations` como array vacío."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/dashboard/queries.test.ts"
+    ],
+    "checkpoint": "step-60-dashboard-queries",
+    "files": ["src/server/dashboard/queries.ts", "tests/dashboard/queries.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T8",
+    "title": "UI del dashboard /app + cambio del destino post-login",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E2-T7", "E2-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario visita `/app` con sesión válida THE SYSTEM SHALL renderizar el dashboard con las 4 secciones de `getAttentionSummary`.",
+      "WHEN un usuario completa signup THE SYSTEM SHALL redirigir a `/app`, no a `/app/inbox`.",
+      "WHEN un usuario hace login con credenciales correctas THE SYSTEM SHALL redirigir a `/app`, no a `/app/inbox`.",
+      "WHEN un usuario visita `/app/inbox` directamente (navegación, no redirect) THE SYSTEM SHALL seguir renderizando la bandeja unificada sin cambios de contenido.",
+      "WHEN `pnpm test tests/integration/auth.test.ts` corre THE SYSTEM SHALL reportar exit 0 — actualizado en este mismo paso si asertaba el destino anterior."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test tests/integration/auth.test.ts"
+    ],
+    "checkpoint": "step-61-dashboard-ui",
+    "files": ["src/app/(app)/page.tsx", "src/components/dashboard/attention-list.tsx", "src/proxy.ts", "src/lib/auth.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T9",
+    "title": "E2E + a11y de notificaciones y dashboard",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T5", "E2-T8"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `tests/e2e/notifications-opt-in.spec.ts` corre THE SYSTEM SHALL reportar el flujo completo activar→verificar→desactivar sin fallos.",
+      "WHEN `tests/e2e/dashboard.spec.ts` corre THE SYSTEM SHALL confirmar que login aterriza en `/app` y que las 4 secciones del dashboard renderizan contenido de los fixtures sembrados.",
+      "WHEN `pnpm test:e2e tests/e2e/a11y.spec.ts` corre contra `/app` (además de las 3 rutas ya auditadas por Fase 1) THE SYSTEM SHALL reportar 0 violaciones de axe."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test:e2e tests/e2e/notifications-opt-in.spec.ts tests/e2e/dashboard.spec.ts",
+      "pnpm test:e2e tests/e2e/a11y.spec.ts"
+    ],
+    "checkpoint": "step-62-e2e-a11y",
+    "files": ["tests/e2e/notifications-opt-in.spec.ts", "tests/e2e/dashboard.spec.ts", "tests/e2e/a11y.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T10",
+    "title": "Verificación final — no regresión sobre Fase 1-3",
+    "epic": "02-hooks-dashboard",
+    "dependencies": ["E1-T4", "E2-T1", "E2-T2", "E2-T3", "E2-T4", "E2-T5", "E2-T6", "E2-T9"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm typecheck && pnpm lint && pnpm test && pnpm test:e2e && pnpm build` corre sobre el árbol completo THE SYSTEM SHALL reportar exit 0 en cada comando, en ese orden.",
+      "WHEN `git tag -l 'step-*' | wc -l` corre THE SYSTEM SHALL reportar al menos `62` — los 48 heredados más los 14 de esta fase visibles en el momento de este Verify (el `step-63` de este mismo paso se añade después, en su Checkpoint).",
+      "WHEN el servidor construido arranca (`node .next/standalone/server.js`, heredado de Fase 1) y se solicita `GET /app` sin sesión THE SYSTEM SHALL redirigir a `/login?next=/app` (misma protección de proxy que cualquier otra ruta de `(app)`)."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm test",
+      "pnpm test:e2e",
+      "pnpm build",
+      "test \"$(git tag -l 'step-*' | wc -l)\" -ge 62"
+    ],
+    "checkpoint": "step-63-verification",
+    "files": [],
+    "status": "pending"
+  }
+]

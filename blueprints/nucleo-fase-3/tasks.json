@@ -1,0 +1,301 @@
+[
+  {
+    "id": "E1-T1",
+    "title": "Dependencia json-logic-engine, schema y migracion",
+    "epic": "01-motor-de-eventos",
+    "dependencies": [],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `node -e \"require('json-logic-engine')\"` se ejecuta THE SYSTEM SHALL salir con codigo 0.",
+      "WHEN `pnpm db:migrate` corre contra la base de datos local THE SYSTEM SHALL crear las tablas `automation`, `automation_action`, `automation_run`, `automation_action_log`, `automation_action_approval`.",
+      "WHEN se inspecciona `automation` con `\\d automation` en `psql` THE SYSTEM SHALL mostrar la columna `org_id` como `not null`.",
+      "WHEN se inspecciona `automation_action` con `\\d automation_action` THE SYSTEM SHALL mostrar un indice unico sobre `(automation_id, position)`.",
+      "WHEN se inspecciona `automation_action_approval` con `\\d automation_action_approval` THE SYSTEM SHALL mostrar un indice unico sobre `(org_id, action_type)`.",
+      "WHEN `pnpm approve-builds --all` corre despues de la instalacion THE SYSTEM SHALL salir con codigo 0."
+    ],
+    "verify": [
+      "pnpm add json-logic-engine@5.0.7",
+      "pnpm approve-builds --all",
+      "node -e \"require('json-logic-engine'); console.log('ok')\"",
+      "pnpm db:migrate",
+      "psql \"$DATABASE_URL\" -c \"\\d automation\" | grep -q \"org_id.*not null\"",
+      "psql \"$DATABASE_URL\" -c \"\\d automation_action\" | grep -q \"automation_action_position_unique\"",
+      "psql \"$DATABASE_URL\" -c \"\\d automation_run\" | grep -q \"condition_matched\"",
+      "psql \"$DATABASE_URL\" -c \"\\d automation_action_log\" | grep -q \"attempt\"",
+      "psql \"$DATABASE_URL\" -c \"\\d automation_action_approval\" | grep -q \"automation_action_approval_org_action_type_unique\""
+    ],
+    "checkpoint": "step-33-json-logic-schema",
+    "files": ["package.json", "pnpm-lock.yaml", "src/db/schema.ts", "drizzle/**"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T2",
+    "title": "Motor de eventos: emisor fire-and-forget",
+    "epic": "01-motor-de-eventos",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `emitAutomationEvent(\"message.received\", payload)` se llama con Redis disponible THE SYSTEM SHALL encolar exactamente 1 job en la cola `automation-events`.",
+      "WHEN `emitAutomationEvent(...)` se llama y la conexion a Redis esta caida (mock que rechaza) THE SYSTEM SHALL no lanzar ninguna excepcion hacia el llamador.",
+      "WHEN `emitAutomationEvent(...)` falla internamente THE SYSTEM SHALL registrar el error con `logger.error` incluyendo el `type` del evento.",
+      "WHEN el test suite de este paso corre THE SYSTEM SHALL reportar 0 fallidos y 0 omitidos."
+    ],
+    "verify": ["pnpm test tests/automations/events.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-34-event-emitter",
+    "files": ["src/server/automations/types.ts", "src/server/automations/events.ts", "tests/automations/events.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T3",
+    "title": "Emision desde los 4 canales de Fase 1 (edicion minima)",
+    "epic": "01-motor-de-eventos",
+    "dependencies": ["E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un webhook de WhatsApp con firma valida llega y la conexion a Redis esta caida (mock) THE SYSTEM SHALL igual responder 200 y persistir el mensaje (via el worker de Fase 1, sin cambio de comportamiento observable).",
+      "WHEN un webhook de WhatsApp valido llega con Redis disponible THE SYSTEM SHALL encolar 1 evento `message.received` con el `externalAccountId` correcto.",
+      "WHEN los 4 canales reciben un evento normalizado equivalente THE SYSTEM SHALL encolar el mismo shape de evento `message.received` en los 4."
+    ],
+    "verify": ["grep -rl \"normalizeInboundEvent\" src/server/channels/*.ts | wc -l | grep -qx 4", "pnpm test tests/automations/events-emission.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-35-emit-from-phase1",
+    "files": ["src/server/channels/whatsapp.ts", "src/server/channels/instagram.ts", "src/server/channels/facebook.ts", "src/server/channels/tiktok.ts", "tests/automations/events-emission.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T4",
+    "title": "Emision desde publish.ts de Fase 2 (edicion minima)",
+    "epic": "01-motor-de-eventos",
+    "dependencies": ["E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un job de publicacion completa exitosamente THE SYSTEM SHALL encolar 1 evento `content.published` con el `contentItemId` correcto.",
+      "WHEN un job de publicacion completa exitosamente y Redis esta caido (mock) THE SYSTEM SHALL igual marcar el `content_item` como `published` sin lanzar excepcion.",
+      "WHEN un job de publicacion falla antes de llegar al punto de emision THE SYSTEM SHALL no encolar ningun evento `content.published`."
+    ],
+    "verify": ["grep -rl \"createContentItem\" src/server/content", "grep -rlE \"worker-publish|export.*publish\" src/server/publishing scripts", "pnpm test tests/automations/events-emission-content.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-36-emit-from-phase2",
+    "files": ["src/server/publishing/publish.ts", "tests/automations/events-emission-content.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T5",
+    "title": "Catalogo de acciones base (tag_conversation, assign_conversation)",
+    "epic": "01-motor-de-eventos",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `catalog.get(\"tag_conversation\")` se llama THE SYSTEM SHALL retornar una entrada con `requiredPermission` definido y un `execute` invocable.",
+      "WHEN `execute()` de `tag_conversation` se llama sin el permiso requerido en el contexto THE SYSTEM SHALL lanzar un error tipado `PermissionDeniedError` y no escribir el tag.",
+      "WHEN `execute()` de `assign_conversation` recibe un `memberId` que no pertenece a la organizacion del evento THE SYSTEM SHALL lanzar `ValidationError` y no asignar.",
+      "WHEN `configSchema` de `assign_conversation` valida un `configJson` sin `memberId` THE SYSTEM SHALL rechazar con un error zod."
+    ],
+    "verify": ["pnpm test tests/automations/actions-catalog.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-37-actions-catalog-base",
+    "files": [
+      "src/server/automations/actions/catalog.ts",
+      "src/server/automations/actions/tag-conversation.ts",
+      "src/server/automations/actions/assign-conversation.ts",
+      "tests/automations/actions-catalog.test.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T1",
+    "title": "Accion send_message con aprobacion en primer uso",
+    "epic": "02-catalogo-y-motor-de-ejecucion",
+    "dependencies": ["E1-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `send_message` se ejecuta por primera vez para una organizacion sin fila en `automation_action_approval` para `action_type = \"send_message\"` THE SYSTEM SHALL lanzar `ApprovalRequiredError` sin invocar el gateway de canal.",
+      "WHEN existe una fila en `automation_action_approval` con `action_type = \"send_message\"` para la organizacion del evento THE SYSTEM SHALL invocar el gateway de canal exactamente una vez con el contenido configurado.",
+      "WHEN `send_message` lanza `ApprovalRequiredError` THE SYSTEM SHALL no escribir ninguna fila en `automation_action_log` desde `send-message.ts` — esa escritura ocurre exclusivamente en `action-runner.ts` (paso 12)."
+    ],
+    "verify": ["pnpm test tests/automations/action-send-message.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-38-action-send-message",
+    "files": ["src/server/automations/actions/send-message.ts", "src/server/automations/actions/errors.ts", "src/server/automations/actions/catalog.ts", "tests/automations/action-send-message.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T2",
+    "title": "Accion create_content_draft (cruza a Fase 2)",
+    "epic": "02-catalogo-y-motor-de-ejecucion",
+    "dependencies": ["E1-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `create_content_draft` se ejecuta con un `configJson` valido THE SYSTEM SHALL crear exactamente 1 fila en `content_item` con `status = \"draft\"`.",
+      "WHEN el `content_item` creado se consulta THE SYSTEM SHALL tener el mismo `org_id` que el evento que disparo la automatizacion.",
+      "WHEN `create_content_draft` se ejecuta con un `configJson` sin el campo `title` requerido THE SYSTEM SHALL rechazar con un error zod antes de llamar a `createContentItem`."
+    ],
+    "verify": ["pnpm test tests/automations/action-create-content-draft.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-39-action-create-content-draft",
+    "files": ["src/server/automations/actions/create-content-draft.ts", "src/server/automations/actions/catalog.ts", "tests/automations/action-create-content-draft.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T3",
+    "title": "Evaluador de condiciones json-logic",
+    "epic": "02-catalogo-y-motor-de-ejecucion",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `evaluateCondition({}, anyPayload)` se llama THE SYSTEM SHALL retornar `true`.",
+      "WHEN `evaluateCondition(sample-condition.json, { tag: \"urgente\" })` se llama THE SYSTEM SHALL retornar `true`.",
+      "WHEN `evaluateCondition(sample-condition.json, { tag: \"normal\" })` se llama THE SYSTEM SHALL retornar `false`.",
+      "WHEN `evaluateCondition` recibe un arbol que `LogicEngine` no puede interpretar THE SYSTEM SHALL retornar `false` sin lanzar excepcion."
+    ],
+    "verify": ["pnpm test tests/automations/condition-evaluator.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-40-condition-evaluator",
+    "files": ["src/server/automations/condition-evaluator.ts", "tests/automations/condition-evaluator.test.ts", "tests/automations/fixtures/sample-condition.json"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T4",
+    "title": "CRUD de automatizaciones (API)",
+    "epic": "02-catalogo-y-motor-de-ejecucion",
+    "dependencies": ["E1-T1", "E1-T5", "E2-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `POST /api/automations` recibe un body valido con 1 accion THE SYSTEM SHALL responder 201 con `status: \"draft\"`.",
+      "WHEN `PATCH /api/automations/[id]` intenta transicionar `draft` a `active` sin ninguna accion configurada THE SYSTEM SHALL responder 422 con `code: \"INVALID_TRANSITION\"`.",
+      "WHEN `PATCH /api/automations/[id]` intenta transicionar `active` a `draft` directamente THE SYSTEM SHALL responder 422 con `code: \"INVALID_TRANSITION\"`.",
+      "WHEN un usuario de la organizacion B solicita `GET /api/automations/[id]` de una automatizacion de la organizacion A THE SYSTEM SHALL responder 404.",
+      "WHEN `POST /api/automations` recibe un `triggerEventType` fuera del conjunto soportado THE SYSTEM SHALL responder 422 con `code: \"VALIDATION_ERROR\"`."
+    ],
+    "verify": ["pnpm test tests/automations/api-crud.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-41-crud-api",
+    "files": ["src/server/automations/service.ts", "src/app/api/automations/route.ts", "src/app/api/automations/[id]/route.ts", "tests/automations/api-crud.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T5",
+    "title": "UI de formulario estructurado",
+    "epic": "02-catalogo-y-motor-de-ejecucion",
+    "dependencies": ["E2-T4"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario con `automation:create` visita `/automations/new` THE SYSTEM SHALL mostrar el `TriggerSelect` con exactamente 2 opciones.",
+      "WHEN el usuario completa el formulario con 1 accion y envia THE SYSTEM SHALL redirigir a `/automations/[id]` mostrando el `status` `draft`.",
+      "WHEN el usuario intenta activar una automatizacion sin acciones THE SYSTEM SHALL mantener el boton \"Activar\" deshabilitado con un tooltip explicando por que."
+    ],
+    "verify": ["pnpm test:e2e tests/e2e/automations-form.spec.ts", "pnpm typecheck"],
+    "checkpoint": "step-42-ui-form",
+    "files": [
+      "src/app/(app)/automations/page.tsx",
+      "src/app/(app)/automations/new/page.tsx",
+      "src/app/(app)/automations/[id]/page.tsx",
+      "tests/e2e/automations-form.spec.ts"
+    ],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T6",
+    "title": "Ejecucion end-to-end (worker de eventos)",
+    "epic": "02-catalogo-y-motor-de-ejecucion",
+    "dependencies": ["E2-T1", "E2-T2", "E2-T3", "E2-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN llega un evento `message.received` que matchea la condicion de una automatizacion activa THE SYSTEM SHALL crear un `automation_run` con `condition_matched = true` y encolar el primer job de accion.",
+      "WHEN llega un evento que no matchea ninguna condicion de una automatizacion activa THE SYSTEM SHALL crear un `automation_run` con `condition_matched = false` y `status = \"completed\"`, sin encolar ninguna accion.",
+      "WHEN no existe ninguna automatizacion activa para el `trigger_event_type` del evento THE SYSTEM SHALL no crear ningun `automation_run`.",
+      "WHEN una automatizacion `paused` tiene el mismo `trigger_event_type` que el evento THE SYSTEM SHALL ignorarla."
+    ],
+    "verify": ["pnpm test tests/automations/worker-e2e.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-43-execution-worker",
+    "files": ["src/server/automations/worker.ts", "scripts/worker.ts", "tests/automations/worker-e2e.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T1",
+    "title": "Reintentos y dead-letter via BullMQ",
+    "epic": "03-confiabilidad-y-lanzamiento",
+    "dependencies": ["E2-T6"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN una accion falla y agota los reintentos configurados THE SYSTEM SHALL escribir una fila en `job_dead_letters` referenciando el `automation_run_id`.",
+      "WHEN una accion falla siendo la primera de la secuencia THE SYSTEM SHALL marcar `automation_run.status = \"failed\"`.",
+      "WHEN una accion falla despues de que al menos 1 accion previa tuvo exito THE SYSTEM SHALL marcar `automation_run.status = \"partial\"`.",
+      "WHEN todas las acciones de la secuencia tienen exito THE SYSTEM SHALL marcar `automation_run.status = \"completed\"` y `finished_at` no nulo.",
+      "WHEN una accion lanza `ApprovalRequiredError` THE SYSTEM SHALL escribir `automation_action_log.status = \"failed\"` con `error = \"approval_required\"` de forma inmediata y SHALL excluir ese intento del pipeline de reintentos/backoff de BullMQ — 0 reintentos encolados para ese job y 0 filas escritas en `job_dead_letters` para ese intento, verificado con un spy/mock sobre el mecanismo de reintento de la cola `jobs`."
+    ],
+    "verify": ["pnpm test tests/automations/retries-dead-letter.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-44-retries-dead-letter",
+    "files": ["src/server/automations/action-runner.ts", "tests/automations/retries-dead-letter.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T2",
+    "title": "UI de historial de runs",
+    "epic": "03-confiabilidad-y-lanzamiento",
+    "dependencies": ["E2-T6"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario visita `/automations/[id]/runs` de una automatizacion con runs previos THE SYSTEM SHALL listar los runs con el mas reciente primero.",
+      "WHEN el usuario expande un run THE SYSTEM SHALL mostrar cada `automation_action_log` en el orden de `position` de la accion correspondiente.",
+      "WHEN una automatizacion nunca se ha disparado THE SYSTEM SHALL mostrar el mensaje de estado vacio especifico, no el mensaje generico de lista vacia.",
+      "WHEN se definen los valores claro y oscuro de `--warning`/`--warning-fg` en `src/app/globals.css` THE SYSTEM SHALL cumplir un contraste >=4.5:1 entre `--warning-fg` y `--warning` en ambos esquemas, verificado por el script de contraste del Verify de esta tarea."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/automations-runs.spec.ts",
+      "pnpm typecheck",
+      "node -e 'const fs = require(\"fs\");const css = fs.readFileSync(\"src/app/globals.css\", \"utf8\");function grab(name, scope) { const re = new RegExp(scope.replace(/[.:]/g, \"\\\\$&\") + \"\\\\s*\\\\{[^}]*?--\" + name + \":\\\\s*(#[0-9a-fA-F]{6})\"); const m = css.match(re); if (!m) { console.error(\"token --\" + name + \" no encontrado en el bloque \" + scope); process.exit(1); } return m[1]; }function luminance(hex) { const c = hex.slice(1).match(/.{2}/g).map((h) => { const v = parseInt(h, 16) / 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); }); return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2]; }function ratio(a, b) { const L1 = luminance(a), L2 = luminance(b); const lighter = L1 > L2 ? L1 : L2; const darker = L1 > L2 ? L2 : L1; return (lighter + 0.05) / (darker + 0.05); }let ok = true;for (const scope of [\":root\", \".dark\"]) { const bg = grab(\"warning\", scope); const fg = grab(\"warning-fg\", scope); const r = ratio(bg, fg); if (r < 4.5) { console.error(scope + \" contraste \" + r.toFixed(2) + \" < 4.5\"); ok = false; } else { console.log(scope + \" contraste OK: \" + r.toFixed(2)); } }process.exit(ok ? 0 : 1);'"
+    ],
+    "checkpoint": "step-45-ui-runs-history",
+    "files": ["src/app/api/automations/[id]/runs/route.ts", "src/app/(app)/automations/[id]/runs/page.tsx", "src/app/globals.css", "tests/e2e/automations-runs.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T3",
+    "title": "Accion ai_classify con invocacion explicita",
+    "epic": "03-confiabilidad-y-lanzamiento",
+    "dependencies": ["E1-T5", "E2-T6"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN una automatizacion no tiene ninguna accion `ai_classify` en su lista THE SYSTEM SHALL nunca invocar el cliente de Anthropic durante la ejecucion de ese `automation_run`.",
+      "WHEN una automatizacion tiene `ai_classify` configurada y se ejecuta THE SYSTEM SHALL invocar el cliente de Anthropic exactamente 1 vez con el prompt configurado.",
+      "WHEN la clasificacion responde THE SYSTEM SHALL escribir el resultado en `automation_action_log.result`."
+    ],
+    "verify": ["pnpm test tests/automations/action-ai-classify.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-46-action-ai-classify",
+    "files": ["src/server/automations/actions/ai-classify.ts", "src/server/automations/actions/catalog.ts", "tests/automations/action-ai-classify.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T4",
+    "title": "Hardening (rate limit, validacion, aislamiento)",
+    "epic": "03-confiabilidad-y-lanzamiento",
+    "dependencies": ["E2-T6"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN una organizacion dispara mas de 120 eventos matcheables en 1 minuto THE SYSTEM SHALL omitir la creacion de runs adicionales sin afectar otras organizaciones.",
+      "WHEN `POST /api/automations` recibe un `conditionJson` con profundidad de anidamiento mayor a 8 THE SYSTEM SHALL responder 422 con `code: \"VALIDATION_ERROR\"`.",
+      "WHEN `POST /api/automations` recibe un `conditionJson` serializado mayor a 16KB THE SYSTEM SHALL responder 422 con `code: \"VALIDATION_ERROR\"`.",
+      "WHEN un usuario de la organizacion B consulta `GET /api/automations/[id]/runs` de una automatizacion de la organizacion A THE SYSTEM SHALL responder 404."
+    ],
+    "verify": ["pnpm test tests/automations/hardening.test.ts", "pnpm typecheck"],
+    "checkpoint": "step-47-hardening",
+    "files": ["src/server/automations/worker.ts", "src/server/automations/service.ts", "tests/automations/hardening.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T5",
+    "title": "Deploy y verificacion end-to-end de la fase",
+    "epic": "03-confiabilidad-y-lanzamiento",
+    "dependencies": ["E3-T1", "E3-T2", "E3-T3", "E3-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `docker compose -f docker-compose.prod.yml config` corre THE SYSTEM SHALL salir con codigo 0.",
+      "WHEN el flujo completo del test de integracion corre (mensaje, condicion, 2 acciones) THE SYSTEM SHALL terminar con `automation_run.status = \"completed\"` y 2 `automation_action_log` con `status = \"success\"`.",
+      "WHEN el mismo test corre sin la aprobacion de `send_message` pre-otorgada THE SYSTEM SHALL terminar con `automation_run.status = \"partial\"`."
+    ],
+    "verify": [
+      "docker compose -f docker-compose.prod.yml config",
+      "pnpm test tests/automations/full-phase-e2e.test.ts",
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm test"
+    ],
+    "checkpoint": "step-48-deploy-verification",
+    "files": ["docker-compose.prod.yml", "tests/automations/full-phase-e2e.test.ts"],
+    "status": "pending"
+  }
+]

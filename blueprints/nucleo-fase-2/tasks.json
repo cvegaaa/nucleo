@@ -1,0 +1,278 @@
+[
+  {
+    "id": "E1-T1",
+    "title": "Dependencias nuevas + MinIO local",
+    "epic": "01-medios-y-contenido",
+    "dependencies": [],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm services:up` corre (con los scripts `services:up`/`services:down`/`services:reset` de `package.json` ya reescritos por este step para incluir `docker-compose.minio.yml`) THE SYSTEM SHALL levantar Postgres, Redis y MinIO, con MinIO en estado `healthy` en menos de 30 segundos.",
+      "WHEN `node scripts/ensure-bucket.mjs` corre por primera vez contra un MinIO vacío THE SYSTEM SHALL crear el bucket `S3_BUCKET` y salir con 0.",
+      "WHEN `node scripts/ensure-bucket.mjs` corre una segunda vez contra el mismo MinIO THE SYSTEM SHALL salir con 0 sin lanzar un error de \"bucket ya existe\".",
+      "WHEN `S3_BUCKET` no está definido al boot THE SYSTEM SHALL fallar el arranque con un error nombrado — mismo patrón de `src/lib/env.ts` que Fase 1.",
+      "WHEN `pnpm install --frozen-lockfile` corre después de `pnpm approve-builds --all` THE SYSTEM SHALL salir con 0 sin error `ERR_PNPM_IGNORED_BUILDS`.",
+      "WHEN `GET /api/health` corre con MinIO alcanzable (bucket ya creado por este step) THE SYSTEM SHALL responder `{ data: { ok: true, ..., storageReachable: true } }`."
+    ],
+    "verify": [
+      "node -e '\nconst fs = require(\"node:fs\");\nconst pkg = JSON.parse(fs.readFileSync(\"package.json\", \"utf8\"));\npkg.scripts[\"services:up\"] = \"docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d postgres redis minio\";\npkg.scripts[\"services:down\"] = \"docker compose -f docker-compose.yml -f docker-compose.minio.yml down\";\npkg.scripts[\"services:reset\"] = \"docker compose -f docker-compose.yml -f docker-compose.minio.yml down -v && docker compose -f docker-compose.yml -f docker-compose.minio.yml up -d postgres redis minio\";\nfs.writeFileSync(\"package.json\", JSON.stringify(pkg, null, 2) + \"\\n\");\n'",
+      "grep -q \"docker-compose.minio.yml\" package.json",
+      "pnpm services:up",
+      "timeout 30 bash -c 'until docker compose -f docker-compose.yml -f docker-compose.minio.yml ps minio | grep -q healthy; do sleep 1; done'",
+      "touch .env && while IFS= read -r line; do case \"$line\" in ''|'#'*) continue ;; esac; key=\"${line%%=*}\"; grep -q \"^${key}=\" .env || printf '%s\\n' \"$line\" >> .env; done < .env.example",
+      "set -a && . ./.env && set +a",
+      "node scripts/ensure-bucket.mjs",
+      "node scripts/ensure-bucket.mjs",
+      "pnpm install --frozen-lockfile",
+      "pnpm typecheck",
+      "pnpm dev & DEV_PID=$!; timeout 30 bash -c 'until curl -sf localhost:3000/api/health >/dev/null; do sleep 1; done'; curl -s localhost:3000/api/health | jq -e '.data.storageReachable == true'; kill $DEV_PID"
+    ],
+    "checkpoint": "step-19-media-deps",
+    "files": ["docker-compose.minio.yml", "package.json", "src/lib/storage/s3-client.ts", "scripts/ensure-bucket.mjs", "src/lib/env.ts", ".env.example", "src/app/api/health/route.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T2",
+    "title": "Schema de contenido + migración + permisos",
+    "epic": "01-medios-y-contenido",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm db:migrate` corre sobre la base de Fase 1 ya migrada THE SYSTEM SHALL crear las 5 tablas `media_asset`, `content_item`, `content_media`, `content_channel_target`, `content_approval` sin tocar ninguna de las 23 tablas existentes.",
+      "WHEN `pnpm db:seed` corre THE SYSTEM SHALL insertar los 8 permisos nuevos en la tabla `permission`, sin duplicarlos si ya existen (upsert por `key`).",
+      "WHEN el rol `owner` se consulta tras el seed THE SYSTEM SHALL tener los 8 permisos nuevos asignados en `role_permission`.",
+      "WHEN el rol `member` se consulta tras el seed THE SYSTEM SHALL tener exactamente 4 de los 8 (`content.create`, `content.edit`, `content.submit`, `media.upload`) — nunca `content.approve`, `content.schedule` ni `content.delete` ni `media.manage`."
+    ],
+    "verify": [
+      "pnpm db:migrate",
+      "psql \"$DATABASE_URL\" -c \"\\d media_asset\"",
+      "psql \"$DATABASE_URL\" -c \"\\d content_item\"",
+      "psql \"$DATABASE_URL\" -c \"\\d content_media\"",
+      "psql \"$DATABASE_URL\" -c \"\\d content_channel_target\"",
+      "psql \"$DATABASE_URL\" -c \"\\d content_approval\"",
+      "pnpm db:seed",
+      "test \"$(psql \"$DATABASE_URL\" -tAc \"select count(*) from permission where key like 'content.%' or key like 'media.%';\")\" = 8"
+    ],
+    "checkpoint": "step-20-content-schema",
+    "files": ["src/lib/db/schema.ts", "drizzle/**", "scripts/seed.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T3",
+    "title": "Biblioteca de medios — backend",
+    "epic": "01-medios-y-contenido",
+    "dependencies": ["E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN se sube una imagen JPEG válida de 2MB THE SYSTEM SHALL crear un `media_asset` con `thumbnail_key` no nulo y responder 201.",
+      "WHEN se sube un archivo mayor a 15MB THE SYSTEM SHALL responder 400 sin subir nada a MinIO.",
+      "WHEN se sube un archivo con `Content-Type: application/x-msdownload` THE SYSTEM SHALL responder 400 sin subir nada a MinIO.",
+      "WHEN un usuario de la organización A pide `GET /api/media/:key` de un objeto de la organización B THE SYSTEM SHALL responder 404.",
+      "WHEN un usuario de la organización dueña del objeto pide `GET /api/media/:key` THE SYSTEM SHALL responder 200 con el `Content-Type` original y el cuerpo del objeto."
+    ],
+    "verify": ["pnpm test tests/integration/media-upload.test.ts"],
+    "checkpoint": "step-21-media-backend",
+    "files": ["src/server/media/upload.ts", "src/server/media/thumbnails.ts", "src/lib/storage/validate-mime.ts", "src/app/api/v1/media/route.ts", "src/app/api/media/[key]/route.ts", "tests/integration/media-upload.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T4",
+    "title": "Biblioteca de medios — UI",
+    "epic": "01-medios-y-contenido",
+    "dependencies": ["E1-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN la biblioteca no tiene medios THE SYSTEM SHALL mostrar el estado vacío con el botón de subida enfocado.",
+      "WHEN se sube un archivo desde la UI THE SYSTEM SHALL mostrarlo en el grid sin recargar la página.",
+      "WHEN el usuario busca por texto que coincide con `original_filename` THE SYSTEM SHALL filtrar el grid a solo esos resultados.",
+      "WHEN el usuario con `media.manage` borra un medio THE SYSTEM SHALL quitarlo del grid inmediatamente y marcar `deleted_at` en la fila.",
+      "WHEN un usuario sin `media.manage` ve el grid THE SYSTEM SHALL no mostrar el botón de borrar."
+    ],
+    "verify": ["pnpm db:generate", "pnpm db:migrate", "psql \"$DATABASE_URL\" -c \"\\d media_asset\" | grep -q original_filename", "pnpm test:e2e tests/e2e/media-library.spec.ts"],
+    "checkpoint": "step-22-media-ui",
+    "files": ["src/app/(app)/content/media/page.tsx", "src/components/media/media-grid.tsx", "src/components/media/media-uploader.tsx", "src/app/api/v1/media/[id]/route.ts", "tests/e2e/media-library.spec.ts", "src/lib/db/schema.ts", "drizzle/**"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T5",
+    "title": "Creación y edición de contenido",
+    "epic": "01-medios-y-contenido",
+    "dependencies": ["E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario con `content.create` crea una pieza con solo título THE SYSTEM SHALL insertar un `content_item` en estado `draft`.",
+      "WHEN un usuario adjunta 2 medios de la biblioteca a una pieza THE SYSTEM SHALL insertar 2 filas en `content_media` con `position` 0 y 1.",
+      "WHEN un `member` intenta editar una pieza creada por otro `member` THE SYSTEM SHALL responder 403 — `content.edit` está acotado a piezas propias para el rol `member`.",
+      "WHEN se edita el cuerpo de una pieza THE SYSTEM SHALL actualizar `updated_at` y registrar un `audit_event` con action `content.edited`.",
+      "WHEN se lista contenido filtrando `status=draft` THE SYSTEM SHALL retornar solo piezas de la organización del usuario en ese estado, paginadas por cursor."
+    ],
+    "verify": ["pnpm test tests/integration/content-items.test.ts"],
+    "checkpoint": "step-23-content-crud",
+    "files": ["src/server/content/items.ts", "src/app/api/v1/content/route.ts", "src/app/api/v1/content/[id]/route.ts", "src/components/content/content-editor.tsx", "src/app/(app)/content/page.tsx", "tests/integration/content-items.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T6",
+    "title": "Flujo de aprobación",
+    "epic": "01-medios-y-contenido",
+    "dependencies": ["E1-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el creador de una pieza en `draft` solicita aprobación THE SYSTEM SHALL crear una fila `content_approval` en `pending` y cambiar `content_item.status` a `pending_approval`.",
+      "WHEN un usuario con `content.approve` aprueba THE SYSTEM SHALL cambiar `content_approval.status` a `approved`, `content_item.status` a `approved`, y registrar `audit_event` con action `content.approved`.",
+      "WHEN un usuario con `content.approve` rechaza con comentario THE SYSTEM SHALL cambiar `content_approval.status` a `rejected`, `content_item.status` de vuelta a `draft`, y guardar el comentario.",
+      "WHEN un usuario sin `content.approve` intenta decidir una aprobación THE SYSTEM SHALL responder 403 sin modificar ninguna fila.",
+      "WHEN una pieza ya tiene una `content_approval` en `pending` THE SYSTEM SHALL rechazar una segunda solicitud de aprobación con 409 conflict."
+    ],
+    "verify": ["pnpm test tests/integration/content-approval.test.ts"],
+    "checkpoint": "step-24-approval",
+    "files": ["src/server/content/approvals.ts", "src/app/api/v1/content/[id]/approval/route.ts", "src/app/api/v1/content/[id]/approval/[approvalId]/route.ts", "src/components/content/approval-panel.tsx", "tests/integration/content-approval.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T7",
+    "title": "Calendario editorial",
+    "epic": "01-medios-y-contenido",
+    "dependencies": ["E1-T3", "E1-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN se programa una pieza `approved` para un canal con `scheduledAt` futuro THE SYSTEM SHALL crear un `content_channel_target` en estado `scheduled`.",
+      "WHEN se intenta programar una pieza en estado `draft` THE SYSTEM SHALL responder 409 conflict sin crear ningún `content_channel_target`.",
+      "WHEN se arrastra una tarjeta programada a otro día en el calendario THE SYSTEM SHALL actualizar `scheduled_at` a la nueva fecha preservando la hora original, sin crear una fila duplicada.",
+      "WHEN se consulta `GET /api/v1/content/calendar?from=X&to=Y` THE SYSTEM SHALL retornar solo `content_channel_target` cuyo `scheduled_at` cae en ese rango, de la organización del usuario.",
+      "WHEN el drag-and-drop se opera solo con teclado (Tab + flechas + Enter, comportamiento nativo de `@dnd-kit`) THE SYSTEM SHALL reprogramar la pieza igual que con mouse."
+    ],
+    "verify": ["pnpm test:e2e tests/e2e/editorial-calendar.spec.ts"],
+    "checkpoint": "step-25-calendar",
+    "files": ["src/server/content/schedule.ts", "src/app/api/v1/content/[id]/schedule/route.ts", "src/app/api/v1/content/calendar/route.ts", "src/components/calendar/editorial-calendar.tsx", "tests/e2e/editorial-calendar.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T1",
+    "title": "Scheduler de publicación multicanal",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E1-T7"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un `content_channel_target` tiene `status='scheduled'` y `scheduled_at` en el pasado THE SYSTEM SHALL encolar exactamente un job de publicación, incluso si el poller corre dos veces antes de que el job se procese.",
+      "WHEN el adaptador del canal responde éxito THE SYSTEM SHALL actualizar `status='published'`, `published_at=now()`, `external_post_id` con el id devuelto.",
+      "WHEN el adaptador del canal lanza una excepción THE SYSTEM SHALL reintentar con backoff exponencial hasta 5 intentos, y tras agotarlos, `status='failed'` + fila en `job_dead_letters`.",
+      "WHEN dos jobs del mismo `content_channel_target.id` se encolan por una carrera del poller THE SYSTEM SHALL procesar la publicación una sola vez — verificado por el `jobId` determinístico de BullMQ.",
+      "WHEN el worker publica exitosamente THE SYSTEM SHALL registrar un `audit_event` con action `content.published`, actor_type `system`."
+    ],
+    "verify": ["pnpm test tests/integration/publish-worker.test.ts", "grep -q '\"worker:publish\"' package.json"],
+    "checkpoint": "step-26-scheduler",
+    "files": ["src/server/publishing/publish.ts", "src/server/publishing/adapters/whatsapp.ts", "src/server/publishing/adapters/instagram.ts", "src/server/publishing/adapters/facebook.ts", "src/server/publishing/adapters/tiktok.ts", "scripts/worker-publish.ts", "tests/integration/publish-worker.test.ts", "package.json"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T2",
+    "title": "Asistencia de IA para contenido",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E2-T1"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN el copiloto invoca `draft_content_copy` por primera vez en una organización THE SYSTEM SHALL detener el stream con `approval_required`, igual que cualquier tool nueva de Fase 1.",
+      "WHEN se aprueba esa primera invocación THE SYSTEM SHALL ejecutar el handler y devolver un borrador de texto no vacío.",
+      "WHEN `suggest_publish_time` se invoca para un canal sin historial de publicaciones THE SYSTEM SHALL devolver `09:00` como sugerencia por defecto.",
+      "WHEN `suggest_publish_time` se invoca para un canal con historial THE SYSTEM SHALL devolver la hora con más publicaciones exitosas pasadas para ese canal.",
+      "WHEN cualquiera de las dos tools se invoca sin el `permission_key` correspondiente THE SYSTEM SHALL responder con el mismo 403 tipado que cualquier otra mutación."
+    ],
+    "verify": ["pnpm test:e2e tests/e2e/copilot.spec.ts"],
+    "checkpoint": "step-27-copilot-content",
+    "files": ["src/server/copilot/tools.ts", "tests/e2e/copilot.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T3",
+    "title": "Dashboard de publicaciones",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E2-T1"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario visita `/app/content/publications` THE SYSTEM SHALL renderizar la tabla de `content_channel_target` de su organización ordenada por `scheduled_at` descendente en el primer response del servidor.",
+      "WHEN el usuario filtra por `status=failed` THE SYSTEM SHALL mostrar solo las filas fallidas, con el mensaje de `error` visible.",
+      "WHEN no hay publicaciones que cumplan los filtros activos THE SYSTEM SHALL mostrar un estado vacío específico para ese filtro.",
+      "WHEN el usuario filtra por `channel=whatsapp` THE SYSTEM SHALL mostrar solo destinos cuyo `channel_connection.channel` es `whatsapp`.",
+      "WHEN `pnpm test:e2e tests/e2e/a11y.spec.ts` corre contra las 6 rutas de `content/*` THE SYSTEM SHALL reportar 0 violations."
+    ],
+    "verify": ["pnpm test:e2e tests/e2e/publications-dashboard.spec.ts", "pnpm test:e2e tests/e2e/a11y.spec.ts"],
+    "checkpoint": "step-28-publications-dashboard",
+    "files": ["src/app/(app)/content/publications/page.tsx", "src/components/publications/publications-table.tsx", "src/app/api/v1/publications/route.ts", "tests/e2e/publications-dashboard.spec.ts", "tests/e2e/a11y.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T4",
+    "title": "Realtime de estado de publicación",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E2-T1", "E2-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN el worker de publicación marca un `content_channel_target` como `published` THE SYSTEM SHALL actualizar la fila en el dashboard de un usuario conectado sin que recargue la página.",
+      "WHEN el worker marca un `content_channel_target` como `failed` THE SYSTEM SHALL actualizar el badge a `failed` con el tooltip de error, sin recarga.",
+      "WHEN un usuario de la organización A está conectado y ocurre un evento de la organización B THE SYSTEM SHALL no entregárselo — mismo aislamiento por room de Fase 1."
+    ],
+    "verify": ["pnpm test:e2e tests/e2e/publications-live.spec.ts"],
+    "checkpoint": "step-29-publications-realtime",
+    "files": ["src/lib/realtime/server.ts", "src/lib/realtime/client.ts", "src/server/publishing/publish.ts", "tests/e2e/publications-live.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T5",
+    "title": "Hardening: MIME real + rate limit de subida",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN se sube un archivo cuyo `Content-Type` dice `image/jpeg` pero cuyos bytes no son una firma JPEG válida THE SYSTEM SHALL responder 400 y no subir nada a MinIO.",
+      "WHEN se sube un archivo `.jpg` que en realidad son los bytes de un ejecutable THE SYSTEM SHALL responder 400 — la extensión del nombre nunca decide el tipo.",
+      "WHEN un usuario hace 31 subidas en un minuto THE SYSTEM SHALL responder 429 en la subida 31.",
+      "WHEN un usuario hace 30 subidas válidas en un minuto THE SYSTEM SHALL aceptar las 30."
+    ],
+    "verify": ["pnpm test tests/integration/media-hardening.test.ts"],
+    "checkpoint": "step-30-media-hardening",
+    "files": ["src/lib/storage/validate-mime.ts", "src/app/api/v1/media/route.ts", "tests/integration/media-hardening.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T6",
+    "title": "Deploy: MinIO en producción",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E1-T1", "E2-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `docker compose -f docker-compose.prod.yml up -d` corre THE SYSTEM SHALL levantar también el servicio `minio`, healthy en menos de 60 segundos junto a los 5 servicios de Fase 1.",
+      "WHEN el script de inserción corre una segunda vez sobre un `docker-compose.prod.yml` que ya tiene `minio` THE SYSTEM SHALL salir con 0 sin duplicar el servicio.",
+      "WHEN `scripts/smoke-test.sh` corre tras un deploy exitoso THE SYSTEM SHALL verificar adicionalmente que el bucket de medios existe, y seguir saliendo con 0."
+    ],
+    "verify": [
+      "node scripts/ensure-minio-in-prod-compose.mjs",
+      "node scripts/ensure-minio-in-prod-compose.mjs",
+      "grep -q \"minio:\" docker-compose.prod.yml",
+      "bash scripts/smoke-test.sh"
+    ],
+    "checkpoint": "step-31-deploy-minio",
+    "files": ["docker-compose.prod.yml", ".env.example", "scripts/smoke-test.sh"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T7",
+    "title": "Verificación local end-to-end",
+    "epic": "02-publicacion-y-operacion",
+    "dependencies": ["E1-T4", "E1-T6", "E2-T2", "E2-T4", "E2-T6"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el gate completo corre sobre el árbol actual THE SYSTEM SHALL reportar 0 fallos en lint, typecheck, tests unitarios, tests de integración, y todos los suites E2E (Fase 1 + Fase 2).",
+      "WHEN se re-ejecuta el Bootstrap sobre un árbol ya bootstrapeado THE SYSTEM SHALL salir con 0 sin revertir `package.json`, `.claude/settings.json`, ni `docker-compose.prod.yml`."
+    ],
+    "verify": [
+      "pnpm lint",
+      "pnpm typecheck",
+      "pnpm test",
+      "pnpm test:e2e",
+      "test \"$(git tag -l 'step-19-*' 'step-20-*' 'step-21-*' 'step-22-*' 'step-23-*' 'step-24-*' 'step-25-*' 'step-26-*' 'step-27-*' 'step-28-*' 'step-29-*' 'step-30-*' 'step-31-*' | wc -l)\" = 13"
+    ],
+    "checkpoint": "step-32-verification",
+    "files": [],
+    "status": "pending"
+  }
+]

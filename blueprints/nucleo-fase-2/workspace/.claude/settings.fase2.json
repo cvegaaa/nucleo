@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose -f docker-compose.yml -f docker-compose.minio.yml up:*)",
+      "Bash(docker compose -f docker-compose.yml -f docker-compose.minio.yml down:*)",
+      "Bash(docker compose -f docker-compose.yml -f docker-compose.minio.yml ps:*)",
+      "Bash(docker compose -f docker-compose.yml -f docker-compose.minio.yml exec:*)",
+      "Bash(cp -f blueprints/nucleo-fase-2/workspace/*)",
+      "Bash(rsync -a --ignore-existing*)",
+      "Bash(curl -s localhost:3000/api/health*)",
+      "Bash(jq:*)",
+      "Bash(touch:*)",
+      "Bash(while:*)"
+    ],
+    "deny": []
+  }
+}

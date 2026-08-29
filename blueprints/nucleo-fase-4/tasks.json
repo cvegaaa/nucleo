@@ -1,0 +1,321 @@
+[
+  {
+    "id": "E1-T1",
+    "title": "Migracion expand runs.agent_key + nullable columns",
+    "epic": "01-motor-compartido",
+    "dependencies": [],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `pnpm db:migrate` corre sobre la base ya migrada de Fase 1-3+notificaciones THE SYSTEM SHALL agregar la columna `agent_key` a `runs` sin eliminar ni renombrar ninguna columna existente de ninguna tabla.",
+      "WHEN la migracion termina THE SYSTEM SHALL dejar `conversation_id` e `initiated_by` de `runs` como nullable.",
+      "WHEN se intenta insertar una fila en `runs` sin `agent_key` THE SYSTEM SHALL rechazar el insert por violacion de NOT NULL.",
+      "WHEN cualquier fila preexistente de `runs` (si la hay) se lee tras la migracion THE SYSTEM SHALL mostrar `agent_key = 'copilot'`.",
+      "WHEN `tests/e2e/copilot.spec.ts` (heredado de Fase 1, sin ninguna modificacion a sus aserciones) corre despues de esta migracion y de la edicion de `runs.ts` THE SYSTEM SHALL seguir pasando."
+    ],
+    "verify": [
+      "pnpm db:migrate",
+      "test \"$(psql \"$DATABASE_URL\" -tAc \"select is_nullable from information_schema.columns where table_name='runs' and column_name='conversation_id'\" | tr -d '[:space:]')\" = \"YES\"",
+      "test \"$(psql \"$DATABASE_URL\" -tAc \"select is_nullable from information_schema.columns where table_name='runs' and column_name='initiated_by'\" | tr -d '[:space:]')\" = \"YES\"",
+      "test \"$(psql \"$DATABASE_URL\" -tAc \"select is_nullable from information_schema.columns where table_name='runs' and column_name='agent_key'\" | tr -d '[:space:]')\" = \"NO\"",
+      "pnpm test tests/unit/schema.test.ts",
+      "pnpm test:e2e tests/e2e/copilot.spec.ts"
+    ],
+    "checkpoint": "step-64-agent-runs-migration",
+    "files": ["src/lib/db/schema.ts", "drizzle/*.sql", "src/server/copilot/runs.ts", "tests/unit/schema.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T2",
+    "title": "Catalogo de agentes + memoria contextual controlada",
+    "epic": "01-motor-compartido",
+    "dependencies": ["E1-T1"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN se importa `AGENT_CATALOG` THE SYSTEM SHALL exponer exactamente las 5 claves `copilot`, `onboarding`, `support`, `content_marketing`, `sales`.",
+      "WHEN `getAgentModelId(\"onboarding\")` se llama sin `ONBOARDING_MODEL_ID` definido THE SYSTEM SHALL devolver el valor de `env.COPILOT_MODEL_ID`.",
+      "WHEN `getAgentModelId(\"onboarding\")` se llama con `ONBOARDING_MODEL_ID` definido THE SYSTEM SHALL devolver ese valor en vez del fallback.",
+      "WHEN `getAgentContext(\"support\", orgId)` se llama THE SYSTEM SHALL devolver unicamente `{ organizationName }`, cero filas de `conversation`, `message`, `contact` o `content_item`.",
+      "WHEN `getAgentContext(\"content_marketing\", orgId)` se llama THE SYSTEM SHALL devolver solo campos `title`/`status`/`scheduledAt` de `content_item` de esa organizacion, cero filas de `conversation` o `message`.",
+      "WHEN `getAgentContext(\"sales\", orgId, { conversationId })` se llama con un `conversationId` que pertenece a otra organizacion THE SYSTEM SHALL devolver un resultado vacio en vez de datos de la conversacion ajena."
+    ],
+    "verify": [
+      "pnpm test tests/unit/agents-registry.test.ts tests/unit/agents-context.test.ts",
+      "pnpm typecheck"
+    ],
+    "checkpoint": "step-65-agent-registry-context",
+    "files": ["src/server/agents/registry.ts", "src/server/agents/context.ts", "src/lib/env.ts", ".env.example", "tests/unit/agents-registry.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T3",
+    "title": "Motor de runs generalizado (multi-agente)",
+    "epic": "01-motor-compartido",
+    "dependencies": ["E1-T1", "E1-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el motor se invoca con `agentKey=\"copilot\"`, `conversationId` e `initiatedBy` presentes THE SYSTEM SHALL crear una fila `runs` con la misma forma que producia el copiloto antes de esta fase.",
+      "WHEN el motor se invoca con un `agentKey` distinto de `copilot` y `conversationId` ausente THE SYSTEM SHALL crear la fila `runs` con `conversation_id = null` sin lanzar ni fallar por la ausencia.",
+      "WHEN el motor se invoca con `initiatedBy` ausente THE SYSTEM SHALL crear la fila `runs` con `initiated_by = null`.",
+      "WHEN el motor resuelve un `agentKey` no registrado en `AGENT_CATALOG` THE SYSTEM SHALL lanzar un error tipado antes de llamar al gateway de IA, sin crear ninguna fila.",
+      "WHEN `tests/e2e/copilot.spec.ts` corre tras esta generalizacion THE SYSTEM SHALL seguir pasando sin ninguna modificacion a sus aserciones."
+    ],
+    "verify": [
+      "pnpm test tests/unit/agents-engine.test.ts",
+      "pnpm test:e2e tests/e2e/copilot.spec.ts",
+      "pnpm typecheck"
+    ],
+    "checkpoint": "step-66-agent-engine",
+    "files": ["src/server/copilot/runs.ts", "tests/unit/agents-engine.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T4",
+    "title": "Backend del agente de onboarding",
+    "epic": "01-motor-compartido",
+    "dependencies": ["E1-T2", "E1-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `getOnboardingProgress` se llama para una organizacion sin canal conectado, con 1 solo miembro y sin automatizaciones THE SYSTEM SHALL devolver los 3 items con `completed: false`.",
+      "WHEN una organizacion tiene 2 filas en `membership` THE SYSTEM SHALL devolver `invite_member` con `completed: true`.",
+      "WHEN el agente de onboarding invoca `get_onboarding_progress` por primera vez en una organizacion THE SYSTEM SHALL detener el stream con `approval_required`.",
+      "WHEN se aprueba esa primera invocacion THE SYSTEM SHALL ejecutar el handler y devolver el progreso real de la organizacion.",
+      "WHEN `GET /api/v1/agents/onboarding/progress` se llama THE SYSTEM SHALL responder sin crear ninguna fila en `runs`."
+    ],
+    "verify": [
+      "pnpm test tests/unit/onboarding-progress.test.ts",
+      "pnpm test:e2e tests/e2e/agents-onboarding.spec.ts"
+    ],
+    "checkpoint": "step-67-onboarding-backend",
+    "files": ["src/server/agents/onboarding/progress.ts", "src/server/agents/onboarding/tools.ts", "src/app/api/v1/agents/onboarding/route.ts", "tests/unit/onboarding-progress.test.ts", "tests/e2e/agents-onboarding.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T5",
+    "title": "Base de conocimiento estatica + backend del agente de soporte",
+    "epic": "01-motor-compartido",
+    "dependencies": ["E1-T2", "E1-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `loadKnowledgeBase()` se llama THE SYSTEM SHALL devolver exactamente 3 entradas, una por archivo de `docs/help/`.",
+      "WHEN `searchKnowledgeBase(\"conectar canal\")` se llama THE SYSTEM SHALL devolver `conectar-canal.md` como el primer resultado.",
+      "WHEN `searchKnowledgeBase` se llama con un query que no coincide con ningun documento THE SYSTEM SHALL devolver un array vacio, nunca lanzar.",
+      "WHEN el agente de soporte invoca `search_knowledge_base` por primera vez en una organizacion THE SYSTEM SHALL detener el stream con `approval_required`."
+    ],
+    "verify": [
+      "pnpm test tests/unit/support-knowledge-base.test.ts",
+      "pnpm typecheck"
+    ],
+    "checkpoint": "step-68-support-backend",
+    "files": ["docs/help/conectar-canal.md", "docs/help/invitar-equipo.md", "docs/help/crear-automatizacion.md", "src/server/agents/support/knowledge-base.ts", "src/server/agents/support/tools.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E1-T6",
+    "title": "UI checklist de onboarding en /app",
+    "epic": "01-motor-compartido",
+    "dependencies": ["E1-T4"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario de una organizacion con checklist incompleto visita `/app` THE SYSTEM SHALL renderizar `OnboardingChecklist` con los items pendientes marcados.",
+      "WHEN los 3 items del checklist estan completos THE SYSTEM SHALL omitir la seccion del checklist por completo del dashboard.",
+      "WHEN `pnpm typecheck` corre tras esta edicion THE SYSTEM SHALL exit 0."
+    ],
+    "verify": [
+      "pnpm typecheck",
+      "pnpm test:e2e tests/e2e/agents-onboarding.spec.ts"
+    ],
+    "checkpoint": "step-69-onboarding-ui",
+    "files": ["src/app/(app)/page.tsx", "src/components/agents/onboarding-checklist.tsx", "src/server/dashboard/queries.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T1",
+    "title": "Panel de chat generico + wrapper del copiloto",
+    "epic": "02-interfaces-y-contenido",
+    "dependencies": ["E1-T3"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN `agent-panel.tsx` se monta con `agentKey=\"copilot\"` THE SYSTEM SHALL consumir `/api/v1/copilot`, nunca `/api/v1/agents/copilot`.",
+      "WHEN `agent-panel.tsx` se monta con `agentKey=\"onboarding\"` THE SYSTEM SHALL consumir `/api/v1/agents/onboarding`.",
+      "WHEN `tests/e2e/copilot.spec.ts` corre tras convertir `copilot-panel.tsx` en wrapper THE SYSTEM SHALL seguir pasando sin ninguna modificacion a sus aserciones."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/agents-onboarding.spec.ts tests/e2e/copilot.spec.ts"
+    ],
+    "checkpoint": "step-70-agent-panel",
+    "files": ["src/components/agents/agent-panel.tsx", "src/components/copilot/copilot-panel.tsx", "src/app/(app)/page.tsx"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T2",
+    "title": "Widget del agente de soporte",
+    "epic": "02-interfaces-y-contenido",
+    "dependencies": ["E1-T5", "E2-T1"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario navega a cualquier ruta bajo (app) THE SYSTEM SHALL mostrar el boton flotante del widget de soporte.",
+      "WHEN se hace clic en el boton THE SYSTEM SHALL expandir el panel del agente de soporte sin recargar la pagina.",
+      "WHEN el foco esta en el panel abierto y se presiona Escape THE SYSTEM SHALL cerrar el panel y devolver el foco al boton flotante."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/agents-support.spec.ts"
+    ],
+    "checkpoint": "step-71-support-widget",
+    "files": ["src/components/agents/support-widget.tsx", "src/app/(app)/layout.tsx", "tests/e2e/agents-support.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T3",
+    "title": "Backend del agente de contenido/marketing",
+    "epic": "02-interfaces-y-contenido",
+    "dependencies": ["E1-T2", "E1-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `suggest_content_series` se invoca con `startDate` presente THE SYSTEM SHALL devolver `pieceCount` piezas, cada una con una fecha sugerida distinta y creciente.",
+      "WHEN `suggest_content_series` se invoca sin `startDate` THE SYSTEM SHALL devolver `pieceCount` piezas sin campo de fecha.",
+      "WHEN el agente de contenido invoca `suggest_content_series` por primera vez en una organizacion THE SYSTEM SHALL detener el stream con `approval_required`.",
+      "WHEN se invoca sin el permiso `content.create` THE SYSTEM SHALL responder con el mismo 403 tipado que cualquier otra mutacion de Fase 1."
+    ],
+    "verify": [
+      "pnpm test tests/unit/content-agent-tools.test.ts",
+      "pnpm typecheck"
+    ],
+    "checkpoint": "step-72-content-agent-backend",
+    "files": ["src/server/agents/content/tools.ts", "src/app/api/v1/agents/content/route.ts", "tests/unit/content-agent-tools.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T4",
+    "title": "UI del calendario editorial sugerido",
+    "epic": "02-interfaces-y-contenido",
+    "dependencies": ["E2-T1", "E2-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN el usuario pide un calendario editorial y recibe piezas sugeridas THE SYSTEM SHALL mostrar un boton \"usar esta pieza\" por cada una.",
+      "WHEN se hace clic en \"usar esta pieza\" THE SYSTEM SHALL crear un content_item en estado draft via POST /api/v1/content, con el titulo y cuerpo de la sugerencia.",
+      "WHEN la pieza recien creada aparece en la lista de contenido THE SYSTEM SHALL mostrarla como cualquier otro content_item en draft."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/agents-content.spec.ts"
+    ],
+    "checkpoint": "step-73-content-agent-ui",
+    "files": ["src/app/(app)/content/calendar/page.tsx", "src/components/calendar/suggested-calendar-panel.tsx", "tests/e2e/agents-content.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E2-T5",
+    "title": "Backend del agente de ventas/atencion — tools de solo lectura",
+    "epic": "02-interfaces-y-contenido",
+    "dependencies": ["E1-T2", "E1-T3"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN `summarize_contact_history` se invoca para una conversacion valida THE SYSTEM SHALL devolver un resumen no vacio basado en los mensajes de esa conversacion.",
+      "WHEN cualquiera de las 3 tools se invoca con un conversationId que pertenece a otra organizacion THE SYSTEM SHALL responder 404, nunca los datos de la conversacion ajena.",
+      "WHEN POST /api/v1/agents/sales recibe un body sin conversationId THE SYSTEM SHALL responder 400 validation_error.",
+      "WHEN cualquiera de las 3 tools se invoca por primera vez en una organizacion THE SYSTEM SHALL detener el stream con approval_required."
+    ],
+    "verify": [
+      "pnpm test tests/unit/sales-agent-tools.test.ts",
+      "pnpm typecheck"
+    ],
+    "checkpoint": "step-74-sales-agent-readonly",
+    "files": ["src/server/agents/sales/tools.ts", "src/app/api/v1/agents/sales/route.ts", "tests/unit/sales-agent-tools.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T1",
+    "title": "Tool de envio con aprobacion (send_conversation_reply)",
+    "epic": "03-ventas-y-cierre",
+    "dependencies": ["E2-T5"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN el agente de ventas invoca send_conversation_reply por primera vez en una organizacion THE SYSTEM SHALL detener el stream con approval_required y no escribir ningun message.",
+      "WHEN se aprueba esa primera invocacion THE SYSTEM SHALL escribir un message con direction='outbound', sender_type='copilot' en la conversacion indicada, y registrar audit_event.",
+      "WHEN la misma organizacion invoca send_conversation_reply una segunda vez tras la primera aprobacion THE SYSTEM SHALL ejecutarla directamente sin volver a pedir aprobacion.",
+      "WHEN se invoca sin el permiso conversation.reply THE SYSTEM SHALL responder con el mismo 403 tipado que cualquier otra mutacion."
+    ],
+    "verify": [
+      "pnpm test tests/integration/sales-agent-send.test.ts"
+    ],
+    "checkpoint": "step-75-sales-agent-send",
+    "files": ["src/server/agents/sales/tools.ts", "tests/integration/sales-agent-send.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T2",
+    "title": "UI del agente de ventas en la bandeja",
+    "epic": "03-ventas-y-cierre",
+    "dependencies": ["E2-T1", "E3-T1"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN un usuario abre una conversacion en la bandeja THE SYSTEM SHALL mostrar dos pestanas distintas: \"Copiloto\" y \"Ventas\".",
+      "WHEN se cambia a la pestana \"Ventas\" THE SYSTEM SHALL mostrar el panel del agente de ventas con el conversationId de la conversacion abierta.",
+      "WHEN se usa send_conversation_reply desde el panel de ventas THE SYSTEM SHALL reflejar el mensaje saliente en la lista de mensajes de la conversacion en vivo."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/agents-sales.spec.ts"
+    ],
+    "checkpoint": "step-76-sales-agent-ui",
+    "files": ["src/components/inbox/conversation-view.tsx", "tests/e2e/agents-sales.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T3",
+    "title": "Auditoria consolidada de los 4 agentes",
+    "epic": "03-ventas-y-cierre",
+    "dependencies": ["E1-T4", "E1-T5", "E2-T3", "E3-T1"],
+    "priority": "p1",
+    "acceptance": [
+      "WHEN send_conversation_reply se ejecuta con exito THE SYSTEM SHALL registrar exactamente una fila en audit_event dentro de la misma transaccion que el message insertado.",
+      "WHEN la transaccion de send_conversation_reply hace rollback THE SYSTEM SHALL dejar audit_event sin la fila.",
+      "WHEN se audita estaticamente el codigo de las 7 tools de solo lectura del catalogo de esta fase THE SYSTEM SHALL confirmar que ninguna llama recordAuditEvent."
+    ],
+    "verify": [
+      "pnpm test tests/unit/agents-audit-coverage.test.ts"
+    ],
+    "checkpoint": "step-77-agents-audit",
+    "files": ["src/server/agents/onboarding/tools.ts", "src/server/agents/support/tools.ts", "src/server/agents/content/tools.ts", "src/server/agents/sales/tools.ts", "tests/unit/agents-audit-coverage.test.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T4",
+    "title": "E2E completo de aislamiento de tenant + a11y",
+    "epic": "03-ventas-y-cierre",
+    "dependencies": ["E1-T6", "E2-T2", "E2-T4", "E3-T2"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN un usuario de la organizacion A invoca cualquiera de los 4 endpoints de agentes nuevos con un conversationId/orgId de la organizacion B THE SYSTEM SHALL responder 404 sin filtrar datos, para los 3 casos aplicables.",
+      "WHEN axe corre sobre /app, /app/inbox con la pestana de ventas abierta, y /app/content/calendar con el panel de calendario sugerido abierto THE SYSTEM SHALL reportar 0 violaciones."
+    ],
+    "verify": [
+      "pnpm test:e2e tests/e2e/tenant-isolation.spec.ts",
+      "pnpm test:e2e tests/e2e/a11y.spec.ts"
+    ],
+    "checkpoint": "step-78-agents-tenant-isolation-a11y",
+    "files": ["tests/e2e/tenant-isolation.spec.ts", "tests/e2e/a11y.spec.ts"],
+    "status": "pending"
+  },
+  {
+    "id": "E3-T5",
+    "title": "Verificacion final de Fase 4",
+    "epic": "03-ventas-y-cierre",
+    "dependencies": ["E3-T3", "E3-T4"],
+    "priority": "p0",
+    "acceptance": [
+      "WHEN git tag -l 'step-*' | wc -l corre THE SYSTEM SHALL reportar exactamente 79.",
+      "WHEN la puerta de aceptacion completa corre sobre un checkout limpio THE SYSTEM SHALL exit 0 en cada linea."
+    ],
+    "verify": [
+      "pnpm install --frozen-lockfile",
+      "pnpm typecheck",
+      "pnpm lint",
+      "pnpm test",
+      "pnpm test:e2e",
+      "pnpm build",
+      "test \"$(git tag -l 'step-*' | wc -l | tr -d ' ')\" = \"79\""
+    ],
+    "checkpoint": "step-79-verification",
+    "files": [],
+    "status": "pending"
+  }
+]

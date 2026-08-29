@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: nucleo
+      POSTGRES_PASSWORD: nucleo_dev_password
+      POSTGRES_DB: nucleo
+    ports:
+      - "5432:5432"
+    volumes:
+      - nucleo_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nucleo"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+  redis:
+    image: redis:8.10.0-alpine3.23
+    ports:
+      - "6379:6379"
+    volumes:
+      - nucleo_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+volumes:
+  nucleo_postgres_data:
+  nucleo_redis_data:
